@@ -12,10 +12,18 @@
     {id:'10000000-0000-4000-8000-000000000002',title:'Glow Portable Table Lamp',category:'Home & Living',summary:'The finishing touch for your favourite corner. A sculptural orange silhouette that brings a little warmth to the everyday.',price:4900,compare_price:null,images:['assets/lamp.webp'],videos:[],description:[{type:'heading',text:'A brighter kind of everyday.'},{type:'text',text:'This is an illustrative preview product, with a generated product image. Replace it with your actual supplier product details and photos before accepting real orders.'},{type:'image',url:'assets/lamp.webp'}],variants:['Orange'],available:true,status:'published',featured:true,created_at:'2026-09-10T07:00:00Z'}
   ];
   const seed = () => ({products:structuredClone(demoProducts),costs:{[demoProducts[0].id]:{supplier_cost:5400,delivery_cost:400,supplier_code:'DEMO-001',supplier_url:''},[demoProducts[1].id]:{supplier_cost:3000,delivery_cost:400,supplier_code:'DEMO-002',supplier_url:''}},orders:[],reviews:[],payouts:[],categories:['Tech & Gadgets','Home & Living','Beauty & Care','Everyday Essentials'],settings:{...defaults},profile:{}});
+  // Cache only public store data. Private orders, costs and accounts are never persisted here.
+  const publicCache=new Map(), cachePrefix='sis-public-v2:'+url+':';
+  function clearPublicCache(){publicCache.clear();try{for(let i=sessionStorage.length-1;i>=0;i--){const k=sessionStorage.key(i);if(k?.startsWith(cachePrefix))sessionStorage.removeItem(k);}}catch{}}
+  function cachedPublic(key,loader,persist=false){
+    const now=Date.now(),found=publicCache.get(key);if(found&&found.until>now)return found.promise;
+    if(persist)try{const saved=JSON.parse(sessionStorage.getItem(cachePrefix+key)||'null');if(saved&&saved.until>now){const entry={until:saved.until,promise:Promise.resolve(saved.value)};publicCache.set(key,entry);return entry.promise;}}catch{}
+    const entry={until:now+60000};entry.promise=Promise.resolve().then(loader).then(value=>{if(persist&&publicCache.get(key)===entry)try{sessionStorage.setItem(cachePrefix+key,JSON.stringify({until:entry.until,value}));}catch{}return value;}).catch(error=>{if(publicCache.get(key)===entry)publicCache.delete(key);throw error;});publicCache.set(key,entry);return entry.promise;
+  }
   let dbPromise,refreshPromise;
   function database(){if(!dbPromise)dbPromise=new Promise((resolve,reject)=>{const r=indexedDB.open('step-in-style-local-preview-v1',1);r.onupgradeneeded=()=>r.result.createObjectStore('data');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(Error('Local preview storage is unavailable. Allow browser storage or connect Supabase.'));});return dbPromise;}
   async function localRead(){const db=await database();return new Promise((resolve,reject)=>{const r=db.transaction('data').objectStore('data').get('store');r.onsuccess=()=>resolve(r.result||seed());r.onerror=()=>reject(r.error);});}
-  async function localWrite(data){const db=await database();return new Promise((resolve,reject)=>{const tx=db.transaction('data','readwrite');tx.objectStore('data').put(data,'store');tx.oncomplete=resolve;tx.onerror=()=>reject(Error('Could not save the preview. Your browser storage may be full.'));});}
+  async function localWrite(data){clearPublicCache();const db=await database();return new Promise((resolve,reject)=>{const tx=db.transaction('data','readwrite');tx.objectStore('data').put(data,'store');tx.oncomplete=resolve;tx.onerror=()=>reject(Error('Could not save the preview. Your browser storage may be full.'));});}
   function getSession(){try{return JSON.parse(sessionStorage.getItem('sis-auth')||'null');}catch{return null;}}
   function putSession(data){if(data?.access_token){sessionStorage.setItem('sis-auth',JSON.stringify({...data,expires_at:Date.now()+((data.expires_in||3600)*1000)}));}else sessionStorage.removeItem('sis-auth');}
   async function raw(path,options={},auth=true){
@@ -25,11 +33,17 @@
       if(!refreshPromise)refreshPromise=raw('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:{refresh_token:s.refresh_token}},false).then(x=>{putSession(x);return x;}).catch(e=>{putSession(null);throw Error('Your session expired. Please sign in again.');}).finally(()=>{refreshPromise=null;});
       s=await refreshPromise;
     }
+    if(options.method && options.method!=='GET' && !path.includes('/object/sign/') && !path.endsWith('/is_admin'))clearPublicCache();
     const body=options.body;
     const headers={apikey:cfg.publishableKey,...options.headers};
     if(auth && s?.access_token)headers.Authorization='Bearer '+s.access_token;
     if(body && !(body instanceof Blob))headers['Content-Type']='application/json';
-    const response=await fetch(url+path,{...options,headers,body:body instanceof Blob?body:body===undefined?undefined:JSON.stringify(body)});
+    const controller=new AbortController(),readOnly=!options.method||options.method==='GET';
+    const timer=readOnly?setTimeout(()=>controller.abort(),15000):null;
+    let response;
+    try{response=await fetch(url+path,{...options,signal:readOnly?controller.signal:options.signal,headers,body:body instanceof Blob?body:body===undefined?undefined:JSON.stringify(body)});}
+    catch(error){if(error.name==='AbortError')throw Error('The connection is taking too long. Please try again.');throw error;}
+    finally{if(timer)clearTimeout(timer);}
     let payload=null;const text=await response.text();try{payload=text?JSON.parse(text):null;}catch{payload=text;}
     if(!response.ok)throw Error(payload?.msg||payload?.message||payload?.error_description||payload?.error||'The request could not be completed. Please try again.');
     return payload;
@@ -38,10 +52,13 @@
   async function rpc(name,body={}){return raw('/rest/v1/rpc/'+name,{method:'POST',body});}
   async function ensureGuest(){if(!live)return null;let s=getSession();if(!s){const r=await raw('/auth/v1/signup',{method:'POST',body:{data:{guest:true}}},false);putSession(r);s=getSession();if(!s)throw Error('Guest checkout is unavailable. The store owner must enable anonymous sign-ins in Supabase.');}return s;}
   const user = () => getSession()?.user || null;
-  async function getSettings(){if(demo)return (await localRead()).settings;const r=await rest('store_settings','id=eq.1&select=data');return {...defaults,...r?.[0]?.data};}
-  async function getProducts(admin=false){if(demo)return (await localRead()).products.filter(p=>admin||p.status==='published');return await rest('products','select=*&order=created_at.desc'+(admin?'':'&status=eq.published'));}
-  async function getProduct(id,admin=false){return (await getProducts(admin)).find(p=>p.id===id)||null;}
-  async function getCategories(){if(demo)return (await localRead()).categories;return (await rest('categories','select=name&order=name')).map(c=>c.name);}
+  function getSettings(){return cachedPublic('getSettings',getSettingsUncached,live);}
+  async function getSettingsUncached(){if(demo)return (await localRead()).settings;const r=await rest('store_settings','id=eq.1&select=data');return {...defaults,...r?.[0]?.data};}
+  function getProducts(admin=false){return admin?getProductsUncached(true):cachedPublic('products',()=>getProductsUncached(false),live);}
+  async function getProductsUncached(admin=false){if(demo)return (await localRead()).products.filter(p=>admin||p.status==='published');return await rest('products','select='+(admin?'*':'id,title,category,summary,price,compare_price,images,variants,available,status,featured,created_at')+'&order=created_at.desc'+(admin?'':'&status=eq.published'));}
+  async function getProduct(id,admin=false){if(!id)return null;const load=async()=>{if(demo)return (await localRead()).products.find(p=>p.id===id&&(admin||p.status==='published'))||null;const rows=await rest('products','select=*&id=eq.'+encodeURIComponent(id)+(admin?'':'&status=eq.published')+'&limit=1');return rows[0]||null;};return admin?load():cachedPublic('product:'+id,load);}
+  function getCategories(){return cachedPublic('getCategories',getCategoriesUncached,live);}
+  async function getCategoriesUncached(){if(demo)return (await localRead()).categories;return (await rest('categories','select=name&order=name')).map(c=>c.name);}
   async function isAdmin(){if(demo)return sessionStorage.getItem('sis-demo-admin')==='true';if(!user())return false;return Boolean(await rpc('is_admin'));}
   async function requireAdmin(){if(!(await isAdmin()))throw Error('An authorised admin account is required.');}
   async function getCosts(){await requireAdmin();if(demo)return (await localRead()).costs;const rows=await rest('product_costs','select=*');return Object.fromEntries(rows.map(r=>[r.product_id,r]));}
@@ -82,7 +99,7 @@
   }
   async function getOrders(admin=false){if(admin)await requireAdmin();if(demo)return admin?(await localRead()).orders:[];if(admin)return rpc('admin_orders');if(!user())return [];return rest('orders','select=*&order=created_at.desc');}
   async function updateOrder(id,changes){await requireAdmin();if(demo){const d=await localRead();d.orders=d.orders.map(o=>o.id===id?{...o,...changes,expected_profit:o.total-(changes.supplier_total??o.supplier_total)-(changes.supplier_delivery??o.supplier_delivery)-(changes.extra_cost??o.extra_cost)}:o);return localWrite(d);}return rpc('update_order',{p_id:id,p_changes:changes});}
-  async function getReviews(productId,admin=false){if(admin)await requireAdmin();let r;if(demo)r=(await localRead()).reviews.filter(x=>(!productId||x.product_id===productId)&&(admin||x.status==='approved'));else r=await rest('reviews','select=*&order=created_at.desc'+(productId?'&product_id=eq.'+encodeURIComponent(productId):'')+(admin?'':'&status=eq.approved'));return Promise.all(r.map(async x=>({...x,media:await Promise.all((x.media||[]).map(async m=>({...m,resolved:await mediaUrl(m).catch(()=>null)})))})));}
+  async function getReviews(productId,admin=false,resolveMedia=true){if(admin)await requireAdmin();let r;if(demo)r=(await localRead()).reviews.filter(x=>(!productId||x.product_id===productId)&&(admin||x.status==='approved'));else r=await rest('reviews','select=*&order=created_at.desc'+(productId?'&product_id=eq.'+encodeURIComponent(productId):'')+(admin?'':'&status=eq.approved'));if(!resolveMedia)return r;return Promise.all(r.map(async x=>({...x,media:await Promise.all((x.media||[]).map(async m=>({...m,resolved:await mediaUrl(m).catch(()=>null)})))})));}
   async function submitReview(data){if(demo){const d=await localRead();const r={...data,id:uuid(),status:'pending',created_at:new Date().toISOString(),reply:''};d.reviews.unshift(r);await localWrite(d);return r;}await ensureGuest();return rpc('submit_review',{p_review:data});}
   async function moderateReview(id,status,reply=''){await requireAdmin();if(demo){const d=await localRead();d.reviews=d.reviews.map(x=>x.id===id?{...x,status,reply}:x);return localWrite(d);}return rest('reviews','id=eq.'+encodeURIComponent(id),{method:'PATCH',body:{status,reply}});}
   async function getPayouts(){await requireAdmin();if(demo)return (await localRead()).payouts;return rest('payouts','select=*&order=paid_at.desc');}

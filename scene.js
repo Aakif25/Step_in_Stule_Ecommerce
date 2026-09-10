@@ -1,6 +1,8 @@
 /* Small, dependency-free WebGL scene: rotating abstract rings and glass-like spheres.
    Draws behind the site, pauses when hidden, and respects reduced-motion preferences. */
 (function(){
+ function start(){
+ if(matchMedia('(prefers-reduced-motion: reduce)').matches || innerWidth<768 || (navigator.hardwareConcurrency&&navigator.hardwareConcurrency<4) || ['admin','checkout','cart','account'].includes(document.body.dataset.page))return;
  const host=document.querySelector('.scene-bg');if(!host)return;
  const canvas=document.createElement('canvas');canvas.setAttribute('aria-hidden','true');canvas.className='three-background';host.prepend(canvas);
  const gl=canvas.getContext('webgl',{alpha:true,antialias:false,powerPreference:'low-power'});if(!gl){canvas.remove();return;}
@@ -16,9 +18,12 @@
  let program;try{program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,vertex));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error('program');}catch{canvas.remove();return;}
  gl.useProgram(program);const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);const pos=gl.getAttribLocation(program,'p');gl.enableVertexAttribArray(pos);gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
  const res=gl.getUniformLocation(program,'resolution'),tm=gl.getUniformLocation(program,'time'),dk=gl.getUniformLocation(program,'dark'),sy=gl.getUniformLocation(program,'scrollY');let raf=0,last=0;const reduced=matchMedia('(prefers-reduced-motion: reduce)');
- function resize(){const ratio=Math.min(devicePixelRatio||1,.7);canvas.width=Math.round(innerWidth*ratio);canvas.height=Math.round(innerHeight*ratio);gl.viewport(0,0,canvas.width,canvas.height);draw(0);}
+ function resize(){const ratio=Math.min(.45,720/innerWidth,480/innerHeight);canvas.width=Math.round(innerWidth*ratio);canvas.height=Math.round(innerHeight*ratio);gl.viewport(0,0,canvas.width,canvas.height);draw(0);}
  function draw(ms){gl.uniform2f(res,canvas.width,canvas.height);gl.uniform1f(tm,ms*.001);gl.uniform1f(dk,document.documentElement.dataset.theme==='dark'?1:0);gl.uniform1f(sy,window.scrollY);gl.drawArrays(gl.TRIANGLES,0,6);}
- function frame(ms){if(document.hidden)return;if(ms-last>40){draw(ms);last=ms;}if(!reduced.matches)raf=requestAnimationFrame(frame);}
+ function frame(ms){if(document.hidden)return;if(ms-last>80){draw(ms);last=ms;}if(!reduced.matches)raf=requestAnimationFrame(frame);}
  function resume(){cancelAnimationFrame(raf);if(!document.hidden){draw(0);if(!reduced.matches)raf=requestAnimationFrame(frame);}}
  window.addEventListener('resize',resize,{passive:true});document.addEventListener('visibilitychange',resume);reduced.addEventListener('change',resume);new MutationObserver(()=>draw(last)).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();cancelAnimationFrame(raf);canvas.style.display='none';});resize();resume();window.addEventListener('pagehide',()=>cancelAnimationFrame(raf),{once:true});
+}
+ const schedule=()=>setTimeout(()=>{if('requestIdleCallback' in window)requestIdleCallback(start,{timeout:3000});else setTimeout(start,100);},1200);
+ if(document.readyState==='complete')schedule();else window.addEventListener('load',schedule,{once:true});
 })();
